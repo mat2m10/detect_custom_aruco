@@ -21,6 +21,47 @@ import argparse
 import os
 import glob
 
+# Width calibrate_camera.py downscales photos to before calibrating. Only used
+# for older camera_params.npz files that do not record image_size.
+CALIB_MAX_WIDTH = 1280
+
+
+def load_calibration(params_path):
+    """Return (camera_matrix, dist_coeffs, calib_size) from camera_params.npz.
+
+    calib_size is the (width, height) of the images the intrinsics were
+    computed on. Files from before image_size was saved were calibrated on
+    photos downscaled to CALIB_MAX_WIDTH px wide; their height is unknown
+    (None) and that width is assumed.
+    """
+    params        = np.load(params_path)
+    camera_matrix = params["camera_matrix"].copy()
+    dist_coeffs   = params["dist_coeffs"]
+    if "image_size" in params.files:
+        calib_size = tuple(int(v) for v in params["image_size"])
+    else:
+        calib_size = (CALIB_MAX_WIDTH, None)
+        print(f"Warning: {params_path} has no image_size; assuming it was "
+              f"calibrated at {CALIB_MAX_WIDTH}px wide. Re-run "
+              f"calibrate_camera.py to record the real size.")
+    return camera_matrix, dist_coeffs, calib_size
+
+
+def scale_camera_matrix(camera_matrix, calib_size, frame_w, frame_h):
+    """Scale intrinsics from the calibration resolution to the frame actually
+    processed (w_frame / w_calib), so they are scaled exactly once."""
+    calib_w, calib_h = calib_size
+    sx = frame_w / calib_w
+    sy = frame_h / calib_h if calib_h else sx
+    if abs(sx - sy) > 0.01 * sx:
+        print(f"Warning: frame {frame_w}x{frame_h} and calibration "
+              f"{calib_w}x{calib_h} have different aspect ratios (portrait vs "
+              f"landscape, or cropped video?). Intrinsics may not apply.")
+    cm = camera_matrix.copy()
+    cm[0] *= sx
+    cm[1] *= sy
+    return cm
+
 
 def load_pose_csv(csv_path):
     """Load interpolated pose CSV into a dict keyed by frame number."""
@@ -81,8 +122,7 @@ def rotate_frame(frame, angle_deg, camera_matrix):
 
 def process(frames_dir, csv_path, params_path):
     # Load calibration
-    params        = np.load(params_path)
-    camera_matrix = params["camera_matrix"].copy()
+    camera_matrix, _, calib_size = load_calibration(params_path)
 
     # Load pose data
     poses = load_pose_csv(csv_path)
@@ -111,18 +151,15 @@ def process(frames_dir, csv_path, params_path):
     os.makedirs(out_dir, exist_ok=True)
     print(f"\nProcessing {len(frames)} frames → {out_dir}/")
 
-    # Scale camera matrix to match detection downscale
-    # (frames were processed at 1280px wide)
+    # Frames are downscaled to 1280px wide (as in extract_pose.py); scale the
+    # intrinsics from calibration resolution to that processed size, once.
     sample     = cv2.imread(frames[0])
     h, w       = sample.shape[:2]
     scale      = 1.0
     if w > 1280:
         scale  = 1280 / w
-        cm     = camera_matrix.copy()
-        cm[0] *= scale
-        cm[1] *= scale
-    else:
-        cm = camera_matrix
+    cm = scale_camera_matrix(camera_matrix, calib_size,
+                             int(w * scale), int(h * scale))
 
     skipped = 0
     corrected = 0

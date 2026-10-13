@@ -21,6 +21,47 @@ DICT_TYPE      = aruco.DICT_4X4_50
 MARKER_SIZE_MM = 30.0
 MIN_MARKER_PX  = 50  # ignore detections smaller than this (noise filter)
 
+# Width calibrate_camera.py downscales photos to before calibrating. Only used
+# for older camera_params.npz files that do not record image_size.
+CALIB_MAX_WIDTH = 1280
+
+
+def load_calibration(params_path):
+    """Return (camera_matrix, dist_coeffs, calib_size) from camera_params.npz.
+
+    calib_size is the (width, height) of the images the intrinsics were
+    computed on. Files from before image_size was saved were calibrated on
+    photos downscaled to CALIB_MAX_WIDTH px wide; their height is unknown
+    (None) and that width is assumed.
+    """
+    params        = np.load(params_path)
+    camera_matrix = params["camera_matrix"].copy()
+    dist_coeffs   = params["dist_coeffs"]
+    if "image_size" in params.files:
+        calib_size = tuple(int(v) for v in params["image_size"])
+    else:
+        calib_size = (CALIB_MAX_WIDTH, None)
+        print(f"Warning: {params_path} has no image_size; assuming it was "
+              f"calibrated at {CALIB_MAX_WIDTH}px wide. Re-run "
+              f"calibrate_camera.py to record the real size.")
+    return camera_matrix, dist_coeffs, calib_size
+
+
+def scale_camera_matrix(camera_matrix, calib_size, frame_w, frame_h):
+    """Scale intrinsics from the calibration resolution to the frame actually
+    processed (w_frame / w_calib), so they are scaled exactly once."""
+    calib_w, calib_h = calib_size
+    sx = frame_w / calib_w
+    sy = frame_h / calib_h if calib_h else sx
+    if abs(sx - sy) > 0.01 * sx:
+        print(f"Warning: frame {frame_w}x{frame_h} and calibration "
+              f"{calib_w}x{calib_h} have different aspect ratios (portrait vs "
+              f"landscape, or cropped video?). Intrinsics may not apply.")
+    cm = camera_matrix.copy()
+    cm[0] *= sx
+    cm[1] *= sy
+    return cm
+
 
 def preprocess(gray):
     clahe  = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
@@ -70,9 +111,7 @@ def marker_size_px(corner):
 
 def process(frames_dir, params_path, do_plot):
     # Load calibration
-    params        = np.load(params_path)
-    camera_matrix = params["camera_matrix"].copy()
-    dist_coeffs   = params["dist_coeffs"]
+    camera_matrix, dist_coeffs, calib_size = load_calibration(params_path)
 
     detector = make_detector()
 
@@ -94,6 +133,7 @@ def process(frames_dir, params_path, do_plot):
     rows        = []
     detected    = 0
     prev_rx     = None
+    cm_size     = None  # (h, w) the current cm was scaled for
 
     for fpath in frames:
         fname = os.path.basename(fpath)
@@ -106,16 +146,16 @@ def process(frames_dir, params_path, do_plot):
 
         # Downscale
         h, w  = img.shape[:2]
-        scale = 1.0
         if w > 1280:
-            scale         = 1280 / w
-            img           = cv2.resize(img, (int(w * scale), int(h * scale)),
-                                       interpolation=cv2.INTER_AREA)
-            cm            = camera_matrix.copy()
-            cm[0]        *= scale
-            cm[1]        *= scale
-        else:
-            cm = camera_matrix
+            scale = 1280 / w
+            img   = cv2.resize(img, (int(w * scale), int(h * scale)),
+                               interpolation=cv2.INTER_AREA)
+        # Intrinsics are in calibration-image pixels: scale them to the
+        # (possibly downscaled) frame we actually detect on.
+        if cm_size != img.shape[:2]:
+            cm_size = img.shape[:2]
+            cm = scale_camera_matrix(camera_matrix, calib_size,
+                                     cm_size[1], cm_size[0])
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         gray = preprocess(gray)
