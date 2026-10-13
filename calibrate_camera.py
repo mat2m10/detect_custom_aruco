@@ -157,9 +157,13 @@ def calibrate(photo_dir):
     else:
         print("(poor — check the _corners.jpg previews, corners may be wrong)")
 
+    # image_size = (width, height) of the (downscaled) images calibrated on.
+    # extract_pose.py / correct_frames.py scale the intrinsics from this size
+    # to the frame size they process.
     np.savez("camera_params.npz",
              camera_matrix=camera_matrix,
-             dist_coeffs=dist_coeffs)
+             dist_coeffs=dist_coeffs,
+             image_size=np.array(image_size))
 
     print("\nCamera matrix:")
     print(camera_matrix)
